@@ -1,0 +1,268 @@
+---
+title: "Substandard Deviations Analysis"
+author: "Javier Valcarcel & Justin Shalap"
+date: "September 20, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Wrangling
+
+## Load relevant R libraries
+
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(hrbrthemes)
+library(gcookbook)
+```
+
+```{r}
+sales <- read_excel("product_sales.xlsx", sheet = 1)
+
+head(sales)
+```
+
+## Data transformation of Voltswitch sales
+
+We see the structure of the data and wish to transform it into a format that can be merged with
+other licensee sales data for comparison and regression. Specifically we want to know their total
+sales, total sales of products using InfiniCharge and what percentage of their revenue came from
+infringing technology.
+
+
+
+```{r, warning = FALSE}
+mycro_line <- c("Mycro 1", "Mycro 2", "Mycro 3")
+
+total_sales_volt <- sales %>%
+  filter(company == "Voltswitch") %>%
+  mutate(year = year(month)) %>%
+  group_by(year) %>%
+  summarise(total_sales = sum(total_sales_USD))
+
+total_sales_volt_mycro <- sales %>%
+  filter(product %in% mycro_line) %>%
+  mutate(year = year(month)) %>%
+  group_by(year) %>%
+  summarise(total_sales_mycro  = sum(total_sales_USD))
+
+volt_sales <- merge(total_sales_volt, total_sales_volt_mycro)
+
+volt_sales1 <- volt_sales %>%
+  mutate(percent_patent = total_sales_mycro / total_sales)
+
+head(volt_sales1)
+```
+
+
+## Data transformation of licensee sales
+
+From here we load, clean and merge the sales data from the other licensees to merge with the
+Voltswitch data.
+
+
+
+```{r}
+companies <- c("Year", "Rekall", "Tyrell Corp.", "Sirius Cybernetics",
+               "Cyberdyne Systems", "Nakatomi Corp.")
+
+licensed_sales <- read_excel("sales_data.xlsx", sheet = 1, cell_rows(7:14))
+
+licensed_sales_clean <- licensed_sales[, c(1, 3, 4, 5, 6, 7)]
+names(licensed_sales_clean) <- companies
+
+licensed_patent_clean <- licensed_sales[, c(1, 9, 10, 11, 12, 13)]
+names(licensed_patent_clean) <- companies
+
+lsc <- licensed_sales_clean %>%
+  gather(company, sales, -Year)
+
+lpc <- licensed_patent_clean %>% 
+  gather(company, percent, -Year)
+
+clean_sales_patents <- merge(lsc, lpc) %>%
+  arrange(Year, company)
+
+head(clean_sales_patents)
+```
+
+
+## Merge Voltswitch with other licensees
+
+We now are able to merge the Voltswitch data with other licensees to view a
+combined data set ready for regression.
+
+
+
+```{r}
+volt_sales2 <- volt_sales1 %>%
+  mutate(Year = year) %>%
+  mutate(company = "Voltswitch") %>%
+  mutate(sales = total_sales) %>%
+  mutate(percent = percent_patent) %>%
+  select(Year, company, sales, percent)
+
+total_sales_df <- rbind(clean_sales_patents, volt_sales2) %>% arrange(Year, company)
+
+royalty_schedule <- tibble(
+  company = companies[-1],
+  royalty_percent = c(0.05, 0.07, 0.02, 0.03, 0.01))
+
+reg_tot1 <- total_sales_df %>%
+  merge(royalty_schedule) %>%
+  mutate(royalties_due = sales * percent * royalty_percent)
+
+reg_tot2 <- reg_tot1 %>%
+  group_by(company) %>%
+  summarise(tot_sales = sum(sales),
+            avg_percent = mean(percent),
+            royalty_percent = mean(royalty_percent))
+
+head(reg_tot2)
+```
+
+
+# Analysis and Modeling
+
+## Estimate reasonable royalties
+
+Here we use linear regression to estimate the best fit given the sales data and 
+share of sales by InfiniCharge products. We also calculate the royalties due.
+
+
+
+```{r}
+roy_mod <- lm(royalty_percent ~ tot_sales + avg_percent, reg_tot2)
+
+volt_sales3 <- volt_sales2 %>%
+  summarise(company = "Voltswitch",
+            tot_sales = sum(sales),
+            avg_percent = mean(percent))
+
+pred_roy_percent <- predict(roy_mod, volt_sales3)
+
+volt_sales3$royalty_percent <- pred_roy_percent
+
+reg_tot3 <- rbind(reg_tot2, volt_sales3)
+
+reg_tot3 %>%
+  mutate(royalties_due = tot_sales * avg_percent * royalty_percent)
+
+
+```
+
+## Validation of reasonable royalties to defeat Georgia-Pacific defense.
+
+We look to validate that the estimated royalty given the presence of similar licenses
+is profitable to demonstrate mutual gains to trade for the license. We should expect the price
+to be above the cost of the license since there are no close substitutes. We use the split-
+apply-combine methodology.
+
+```{r}
+
+results <- read_excel("survey_results.xlsx", sheet = "Survey Results", cell_rows(4:54))
+
+key <- read_excel("survey_results.xlsx", sheet = "Question Key", cell_rows((4:28)))
+
+results1 <- results[, -1]
+
+split_prices <- split(results1, seq(1:50))
+prices_lists <- lapply(split_prices, t)
+prices_lists <- lapply(prices_lists, cbind, key)
+tester <- bind_rows(prices_lists)
+
+tester_names <- c("Price", "Question", "Talk_Time", "Weight", "PPI", "Camera")
+names(tester) <- tester_names
+
+head(tester)
+
+tester_model <- lm(Price ~ Talk_Time + Weight + PPI + Camera, tester)
+
+tester_model
+
+anova(tester_model)
+```
+
+
+
+## Predicting prices for different products
+
+Given the model for prices based on the survey results, we now use that to price
+best alternatives to satisfy the but-for process. But-for the infringement
+what would Voltswitch's alternatives have been? We price those and analyze whether
+those alternatives were as profitable as using InfiniCharge.
+
+
+```{r}
+desc <- read_excel("product_descriptions.xlsx", sheet =1, cell_rows(6:23))
+marg <- read_excel("product_margins.xlsx", sheet =1, cell_rows(6:23))
+
+desc1 <- desc[, -c(2,5)]
+marg1 <- marg[, -2]
+
+desc_marg <- merge(desc1, marg1)
+names(desc_marg) <- c("Product", "Parent_Co", "Release_Date", "Talk_Time", "Weight",
+                      "Screen", "Memory", "Camera", "PPI", "Margin")
+
+head(desc_marg)
+
+dm_data <- desc_marg %>%
+  select(Talk_Time, Weight, PPI, Camera)
+
+prod_preds <- predict(tester_model, dm_data)
+desc_marg$pred <- prod_preds
+
+desc_marg <- desc_marg %>%
+  mutate(profits = pred * Margin) %>%
+  mutate(pred_royalty = pred * 0.02) %>%
+  mutate(profit_over_license = profits - pred_royalty) %>%
+  arrange(profits)
+
+tail(desc_marg, n= 9)
+```
+
+# Validation through visualization
+
+We create some visuals which convey the structure of the data to
+non-technical stakeholders
+
+```{r, warning=FALSE}
+
+reg_tot3 %>%
+  ggplot(aes(x = company, y = avg_percent, size = royalty_percent)) +
+    guides(size = FALSE, colour = FALSE) +
+    labs(x = "Companies",
+         y = "Yearly average percentage",
+         title = "Companies by average share",
+         subtitle = "Yearly average from 2009-2014",
+         caption = "We see that generally the royalty rate increases as the percentage increases.") +
+    geom_point(aes(colour = company)) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 15, hjust = 0.7, size = 10))
+
+```
+
+```{r}
+prof_dev <- desc_marg[9:17,]
+
+pd_viz_df <- prof_dev[, c(1, 12)]
+
+pd_viz_df %>%
+  mutate(Product = as.factor(Product)) %>%
+  ggplot(aes(x = Product, y = profits)) +
+    guides(size = FALSE, colour = FALSE) +
+    labs(x = "Product",
+         y = "Profits per device",
+         title = "Profit comparison by products",
+         subtitle = "InfiniCharge devices and alternatives",
+         caption = "We see that the profits of using InfiniCharge are greater per device than alternative") +
+    geom_point(aes(colour = Product, size = profits)) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 15, hjust = 0.7, size = 10))
+```
